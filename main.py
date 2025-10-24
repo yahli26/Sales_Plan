@@ -3,42 +3,53 @@ import clr
 clr.AddReference("RevitNodes")
 clr.AddReference('RevitAPI')
 from Autodesk.Revit.DB import *
-from Autodesk.Revit.DB import FilteredElementCollector, Dimension
+from Autodesk.Revit.DB import FilteredElementCollector, CurveLoop
 from Autodesk.Revit.DB.Architecture import *
 clr.AddReference('RevitServices')
 import RevitServices
 from RevitServices.Persistence import DocumentManager
 from RevitServices.Transactions import TransactionManager
-from Autodesk.Revit.DB import DimensionType as dmt
 from Revit.Elements import *
+from Autodesk.Revit.DB import FamilyInstance, Family
 clr.ImportExtensions(RevitServices.Elements)
 
+import math
 
-
+ 
 doc = DocumentManager.Instance.CurrentDBDocument
 view = doc.ActiveView
 sketch_plane = view.SketchPlane
 
-# learn how to use with TRANSACTION
+rooms = FilteredElementCollector(doc, doc.ActiveView.Id).OfCategory(BuiltInCategory.OST_Rooms).WhereElementIsNotElementType().ToElements()
 
-#using Autodesk.Revit.DB.SpatialElement to get all rooms
-rooms = FilteredElementCollector(doc, view.Id).OfCategory(BuiltInCategory.OST_Rooms).WhereElementIsNotElementType().ToElements()
-walls = FilteredElementCollector(doc, view.Id).OfCategory(BuiltInCategory.OST_Walls).WhereElementIsNotElementType().ToElements()
-DIM_FROM_SIZE = IN[0] #dimesion only if it is greater than {40cm} 
+all_doors = FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_Doors).WhereElementIsNotElementType().ToElements()
+# Get all windows in the document
+all_windows = FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_Windows).WhereElementIsNotElementType().ToElements()
+all_ceiling = FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_Ceilings).WhereElementIsNotElementType().ToElements()
+
+
+
+#get all family needed to be add from dynamo
+family_vent_mamad = IN[0] if str(IN[0]) != None else None
+family_elevation_triangle = IN[1] if str(IN[1]) != None else None
+family_entrance_triangle = IN[2] if str(IN[2]) != None else None
+family_balcony_triangle = IN[3] if str(IN[3]) != None else None
+family_vent_close = IN[4] if str(IN[4]) != None else None
+family_room_tag = IN[5] if str(IN[5]) != None else None
+filter_vent_close = IN[6] #boolean
+
+family_asterist_1 = IN[7] if str(IN[7]) != None else None
+family_asterist_2 = IN[8] if str(IN[8]) != None else None
+family_asterist_3 = IN[9] if str(IN[9]) != None else None
+
+LOWER_CEILING_DIFF = 10 #cm IN[7] maybe
+SQR_OF_3 = 1.732
 FEET_TO_CM = 30.48
-MIN_DIFF_BETWEEN_2_DIM_SAME_ROOM = IN[1] #there cannot be 2 different dimesion in the same room & rotation with less than {6cm} diff
-MINIMUM_SEGMENT_LENGTH = IN[2] #minimum size of wall to dimesion in {cm} 
-is_override = IN[3] if IN[3] is not None else False
-
-
-v_dims_lengths = [] #vertical dimesions sizes 
-h_dims_lengths = [] #horizontal dimesions sizes
-output = []
+family_sum_created = [0]*5
 errors = []
-dim_ids = []
-count_sum_dims = 0
+output = []
 view__cropped_shape = []
-DIM_FRONT_TYPE = "Dim 3 mm"
+rooms_n_bbs = []
 
 def get_linked_elements():
     # Collect all RevitLinkInstances in the document
@@ -50,643 +61,45 @@ def get_linked_elements():
 
         if linked_doc:
             # Apply a bounding box filter for elements visible in the active view
-            # offset =15
             # view_bounding_box = view.CropBox
+            # offset =15
             # outline = Outline((view_bounding_box.Min - XYZ(offset, offset, offset)), (view_bounding_box.Max + XYZ(offset, offset, offset)))
             # bounding_box_filter = BoundingBoxIntersectsFilter(outline)
-            global rooms
-            global walls
-            
-            #z_floor = view.GenLevel.Elevation
-            # output.append([z_floor, view_bounding_box.Max, view_bounding_box.Min])
 
-            all_rooms = list(rooms)
             # Collect elements from the linked document that are within the bounding box
+            global rooms
+            global all_doors
+            global all_windows
+            global all_ceiling
+            
+            #.WherePasses(bounding_box_filter)
+            all_rooms = list(rooms)
             all_rooms.extend(FilteredElementCollector(linked_doc).\
             OfCategory(BuiltInCategory.OST_Rooms)\
-            .WhereElementIsNotElementType().ToElements())
-
+            .WhereElementIsNotElementType().ToElements()) 
+          
             rooms = list(all_rooms)
-            # output.append([room_to_name(room) for room in rooms])
-
-             #WherePasses(bounding_box_filter)
-            all_walls = list(walls)
-            all_walls.extend(FilteredElementCollector(linked_doc).\
-            OfCategory(BuiltInCategory.OST_Walls)\
+            
+            doors = list(all_doors)
+            doors.extend(FilteredElementCollector(linked_doc).\
+            OfCategory(BuiltInCategory.OST_Doors)\
             .WhereElementIsNotElementType().ToElements())
-
-            walls = list(all_walls)
-
-
-def point_is_between(point, curve, isvertical):
-    if isvertical == 1:
-        if point.Y > curve.GetEndPoint(0).Y and point.Y < curve.GetEndPoint(1).Y:
-            return True
-        elif point.Y < curve.GetEndPoint(0).Y and point.Y > curve.GetEndPoint(1).Y:
-            return True
-    elif isvertical == 0:
-        if point.X > curve.GetEndPoint(0).X and point.X < curve.GetEndPoint(1).X:
-            return True
-        elif point.X < curve.GetEndPoint(0).X and point.X > curve.GetEndPoint(1).X:
-            return True
-    return False
-
-def cant_be_dimension(boundary_curve1_line1, boundary_curve1_line2, boundary_curve2_line1, boundary_curve2_line2):
-    cant_be_dimension1 = not lines_coordinates_can_be_dimension(boundary_curve1_line1, boundary_curve2_line1)
-    cant_be_dimension2 = not lines_coordinates_can_be_dimension(boundary_curve1_line1, boundary_curve2_line2)
-    cant_be_dimension3 = not lines_coordinates_can_be_dimension(boundary_curve1_line2, boundary_curve2_line1)
-    cant_be_dimension4 = not lines_coordinates_can_be_dimension(boundary_curve1_line2, boundary_curve2_line2)
-
-    return cant_be_dimension1 and cant_be_dimension2 and cant_be_dimension3 and cant_be_dimension4
-
-def create_demo_dim(boundary_curve1_line1, boundary_curve1_line2, boundary_curve2_line1, boundary_curve2_line2):
-    dim1_start = boundary_curve1_line1.GetEndPoint(0)
-    dim1_end = XYZ(dim1_start.X, boundary_curve1_line2.GetEndPoint(0).Y, dim1_start.Z)
-    dim2_start = boundary_curve2_line1.GetEndPoint(0)
-    dim2_end = XYZ(dim2_start.X, boundary_curve2_line2.GetEndPoint(0).Y, dim2_start.Z)
-
-    if not is_Line_Vertical(boundary_curve1_line1):
-        dim1_end = XYZ(boundary_curve1_line2.GetEndPoint(0).X, dim1_start.Y, dim1_start.Z)
-        dim2_end = XYZ(boundary_curve2_line2.GetEndPoint(0).X, dim2_start.Y, dim2_start.Z)
-
-    dim_line1 = Line.CreateBound(dim1_start, dim1_end)
-    dim_line2 = Line.CreateBound(dim2_start, dim2_end)
-    return dim_line1, dim_line2
-
-
-
-def is_overlapping_lines(line1, line2):
-    is_vertical = not is_Line_Vertical(line1)
-    is_overlap1 = point_is_between(line1.GetEndPoint(0), line2, is_vertical)
-    is_overlap2 = point_is_between(line1.GetEndPoint(1), line2, is_vertical)
-    is_overlap3 = point_is_between(line2.GetEndPoint(0), line1, is_vertical)
-    is_overlap4 = point_is_between(line2.GetEndPoint(1), line1, is_vertical)
-
-    return is_overlap1 or is_overlap2 or is_overlap3 or is_overlap4
-
-def curves_need_connection(boundaries_dim1, boundaries_dim2):
-    if boundaries_dim1 != None and boundaries_dim2 != None:
-        boundary_curve1_line1 = boundaries_dim1[0]
-        boundary_curve1_line2 = boundaries_dim1[1]
-
-        boundary_curve2_line1 = boundaries_dim2[0]
-        boundary_curve2_line2 = boundaries_dim2[1]
-
-        is_vertical = not is_Line_Vertical(boundary_curve1_line1)
-
-        if cant_be_dimension(boundary_curve1_line1, boundary_curve1_line2, boundary_curve2_line1, boundary_curve2_line2):
-            return False
-
-        dim_line1, dim_line2 = create_demo_dim(boundary_curve1_line1, boundary_curve1_line2, boundary_curve2_line1, boundary_curve2_line2)
-        
-        if is_overlapping_lines(dim_line1, dim_line2):
-            return False
-
-
-        
-        offset = 0.0001
-
-        dim_s = round(distance_between_lines(boundary_curve1_line1, boundary_curve1_line2)*FEET_TO_CM)
-        dim_s2 = round(distance_between_lines(boundary_curve2_line1, boundary_curve2_line2)*FEET_TO_CM)
-
-        a1 = boundary_curve1_line1.GetEndPoint(0).Y
-        a2 = boundary_curve1_line2.GetEndPoint(0).Y
-        b1 = boundary_curve2_line1.GetEndPoint(0).Y
-        b2 = boundary_curve2_line2.GetEndPoint(0).Y
-        l_ys = [a1, a2, b1, b2]
-        # if is_vertical and (dim_s == 220 or dim_s2 == 220):
-        #     output.append([dim_s, dim_s2, l_ys])
-        # if is_vertical and (dim_s == 150 or dim_s2 == 150):
-        #     output.append([dim_s, dim_s2, l_ys])
-
-      
-        
-        if is_vertical == 1:
-            if dif_less_then_minimum(boundary_curve1_line1.GetEndPoint(0).Y, boundary_curve2_line1.GetEndPoint(0).Y, offset):
-                return True
-            if dif_less_then_minimum(boundary_curve1_line1.GetEndPoint(0).Y, boundary_curve2_line2.GetEndPoint(0).Y, offset):
-                return True
-            if dif_less_then_minimum(boundary_curve1_line2.GetEndPoint(0).Y, boundary_curve2_line1.GetEndPoint(0).Y, offset):
-                return True
-            if dif_less_then_minimum(boundary_curve1_line2.GetEndPoint(0).Y, boundary_curve2_line2.GetEndPoint(0).Y, offset):
-                return True
-        elif is_vertical == 0:
-            if dif_less_then_minimum(boundary_curve1_line1.GetEndPoint(0).X, boundary_curve2_line1.GetEndPoint(0).X, offset):
-                return True
-            if dif_less_then_minimum(boundary_curve1_line1.GetEndPoint(0).X, boundary_curve2_line2.GetEndPoint(0).X, offset):
-                return True
-            if dif_less_then_minimum(boundary_curve1_line2.GetEndPoint(0).X, boundary_curve2_line1.GetEndPoint(0).X, offset):
-                return True
-            if dif_less_then_minimum(boundary_curve1_line2.GetEndPoint(0).X, boundary_curve2_line2.GetEndPoint(0).X, offset):
-                return True
             
-    return False
+            all_doors = list(doors)
 
 
-
-def create_connected_dim(isVertical, points):
-    coor = []
-    if isVertical == 1:
-        coor = [p.Y for p in points]
-    elif isVertical == 0:
-        coor = [p.X for p in points]
-
-    if coor != []:
-        max_value = max(coor)
-        min_Value = min(coor)
-        index_max = coor.index(max_value)
-        index_min = coor.index(min_Value)
-        start_point = points[index_min]
-        end_point = points[index_max]
-        # output.append(isVertical)
-        if isVertical == 1:
-            offset = XYZ(0.1 ,0 ,0)
-            #output.append([start_point, end_point])
-            bottom_line = Line.CreateBound((start_point + offset), (start_point - offset))
-            top_line = Line.CreateBound((XYZ(start_point.X, end_point.Y, start_point.Z) + offset), (XYZ(start_point.X , end_point.Y, start_point.Z)- offset))
-
-            create_dimension(bottom_line, top_line, -2)
-        elif isVertical == 0:
-            offset = XYZ(0 ,0.1 ,0)
-
-            left_line = Line.CreateBound((start_point + offset), (start_point- offset))
-            right_line = Line.CreateBound((XYZ(end_point.X, start_point.Y, start_point.Z) + offset), (XYZ(end_point.X , start_point.Y, start_point.Z)- offset))
-
-            create_dimension(left_line, right_line, -2)
-
-def boundaries_dim_to_points(boundaries):
-    boundary_line1 = boundaries[0]
-    boundary_line2 = boundaries[1]
-
-    from_line = boundary_line1 if boundary_line1.Length <= boundary_line2.Length else boundary_line2 #smaller line
-    to_line = boundary_line2 if from_line == boundary_line1 else boundary_line1
-    
-    line_curve1 = create_center_curve(from_line)
-    line_curve2 = create_center_of_other(to_line, from_line)
-    point_curve1 = get_center_xyz(line_curve1.GeometryCurve, False)
-    point_curve2 = get_center_xyz(line_curve2.GeometryCurve, False)
-
-    return [point_curve1, point_curve2]
-
-
-    
-
-     
-
-
-
-def connect_broken_dims():
-    doc = DocumentManager.Instance.CurrentDBDocument
-    collector = FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_Dimensions)
-    dimensions = collector.WhereElementIsNotElementType().ToElements()
-    global dim_ids
-    dims_created_now = [dim for dim in dimensions if dim.Id in dim_ids]
-
-    dims_to_connect = []
-    #ex: lenroom = [length, room, [2 segment boundaries]]
-    for index, len_room in enumerate(h_dims_lengths):
-        for len_room2 in h_dims_lengths[index+1:]:
-            if len_room[1] != len_room2[1]: #not same room
-                if curves_need_connection(len_room[2], len_room2[2]): #has exactly same y/x but different rooms
-                    dims_to_connect.append([len_room, len_room2])
-                    break
-    
-
-    for index, len_room in enumerate(v_dims_lengths):
-        for len_room2 in v_dims_lengths[index+1:]:
-            if len_room[1] != len_room2[1]: #not same room
-                if curves_need_connection(len_room[2], len_room2[2]): #has exactly same y/x but different rooms
-                    dims_to_connect.append([len_room, len_room2])
-                    break
-
-    ids_to_delete = []
-    for len_rooms_curves in dims_to_connect:
-        points = []
-        for dim in len_rooms_curves:
-            for real_dim in dims_created_now:
-                below = real_dim.Below.split(' ') #[isvertical, room number]
+            windows = list(all_windows)
+            windows.extend(FilteredElementCollector(linked_doc).\
+            OfCategory(BuiltInCategory.OST_Windows)\
+            .WhereElementIsNotElementType().ToElements())
             
-                if dim[1] == int(below[1]): #same room
-                    if (not is_Line_Vertical(dim[2][0]) == 0 and below[0] == "horizontal") or  (not is_Line_Vertical(dim[2][0]) == 1 and  below[0] == "vertical"): #same orietation
-                            if int(real_dim.ValueOverride) + 5 == dim[0]: #same size
-                                points.extend(boundaries_dim_to_points(dim[2]))
-                                ids_to_delete.append(real_dim.Id) 
-                                break
-        create_connected_dim(not is_Line_Vertical(len_rooms_curves[0][2][0]), points)
+            all_windows = list(windows)
 
-    for id in ids_to_delete:
-        TransactionManager.Instance.EnsureInTransaction(doc)
-        try:
-            doc.Delete(id)
-        except:
-            pass
-        TransactionManager.Instance.TransactionTaskDone()
-
-
-
-
-def filter_duplicates(dims_created_now):
-    remove_duplicate = [] #list of duplicate dim {sizes, is vertical, room number}, with as many values as there is duplicates
-    #ex: {1,1,1,1,2,2,2,3,4,4} output: {1,1,1,2,2,4}
-    global h_dims_lengths
-    global v_dims_lengths
-
-    for index, len_room in enumerate(h_dims_lengths):
-        for len_room2 in h_dims_lengths[index+1:]:
-            if len_room[1] == len_room2[1]: #same room
-                
-                if len_room[0] == len_room2[0]: #same size
-                    remove_duplicate.append([len_room[0], 0, len_room[1]])
-                    break
-    
-
-    for index, len_room in enumerate(v_dims_lengths):
-        for len_room2 in v_dims_lengths[index+1:]:
-            if len_room[1] == len_room2[1]: #same room
-                if len_room[0] == len_room2[0]: #same size
-                    remove_duplicate.append([len_room[0], 1, len_room[1]]) #len, isvertical, room
-                    break
-    return remove_duplicate
-
-def delete_below_text():
-    doc = DocumentManager.Instance.CurrentDBDocument
-    collector = FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_Dimensions)
-    dimensions = collector.WhereElementIsNotElementType().ToElements()
-    #dim_in_view = [dim for dim in dimensions if dim.View and dim.View.Id == doc.ActiveView.Id]
-    global dim_ids
-    dims_created_now = [dim for dim in dimensions if dim.Id in dim_ids]
-
-    TransactionManager.Instance.EnsureInTransaction(doc)
-    for dim in dims_created_now:
-        dim.Below = ""
-    TransactionManager.Instance.TransactionTaskDone()
-
-
-def filter_small_diff_dim(dims_created_now):
-   remove = []
-   global h_dims_lengths
-   global v_dims_lengths
-
-   for index, len_room in enumerate(h_dims_lengths):
-        for len_room2 in h_dims_lengths[index+1:]:
-            if len_room[1] == len_room2[1]: #same room
-                if dif_less_then_minimum(len_room[0], len_room2[0], MIN_DIFF_BETWEEN_2_DIM_SAME_ROOM): #diff less than min
-                    remove.append([max(len_room[0], len_room2[0]), 0, len_room[1]])  #[len, isvertical, room]
-                    if len_room[0] > len_room2[0]: #remove the larger dimension, smaller is from wall face 
-                        h_dims_lengths.pop(index)
-                    else:
-                        h_dims_lengths.pop(index+1)
-
-   for index, len_room in enumerate(v_dims_lengths):
-        for len_room2 in v_dims_lengths[index+1:]:
-            if len_room[1] == len_room2[1]: #same room
-                if dif_less_then_minimum(len_room[0], len_room2[0], MIN_DIFF_BETWEEN_2_DIM_SAME_ROOM):#diff less than min
-                    remove.append([max(len_room[0], len_room2[0]), 1, len_room[1]]) #[len, isvertical, room]
-                    if len_room[0] > len_room2[0]:#remove the larger dimension, smaller is from wall face 
-                        v_dims_lengths.pop(index)
-                    else:
-                        v_dims_lengths.pop(index+1)
-    
-   return remove
-    
-
-def get_center_xyz(line, isUp):
-    x = (line.GetEndPoint(0).X + line.GetEndPoint(1).X)/2
-    y = (line.GetEndPoint(0).Y + line.GetEndPoint(1).Y)/2
-    z = (line.GetEndPoint(0).Z + line.GetEndPoint(1).Z)/2
-    if isUp:
-        x += (line.GetEndPoint(0).X - line.GetEndPoint(1).X)/50
-        y += (line.GetEndPoint(0).Y - line.GetEndPoint(1).Y)/50
-        z += (line.GetEndPoint(0).Z - line.GetEndPoint(1).Z)/50
-    return XYZ(x,y,z)
-
-def create_center_curve(line): #create a small line on the center of another (little bit above)
-    center_line = Line.CreateBound(get_center_xyz(line, isUp = True), get_center_xyz(line, isUp = False))
-    TransactionManager.Instance.EnsureInTransaction(doc)
-
-    line_curve = doc.Create.NewModelCurve(center_line, sketch_plane) 
-
-    #White color the temporal, Get the curve's graphics
-    curve_gstyle = line_curve.LineStyle
-    
-    # Create a white color (255, 255, 255)
-    white_color = Color(255, 255, 255)
-    
-    # Set the curve color to white
-    curve_gstyle.GraphicsStyleCategory.LineColor = white_color
-
-    TransactionManager.Instance.TransactionTaskDone()
-    return line_curve
-
-def create_center_of_other(line, line_center_from): #create a small line on line in front of the center of the smaller line
-    #create the side of dimension on the bigger wall when walls aren't the same size 
-    center = get_center_xyz(line_center_from, isUp = False)
-    center_above = get_center_xyz(line_center_from, isUp = True)
-    #points needed to be changed:
-    center_to_change = get_center_xyz(line, isUp = False)
-    center_above_to_change = get_center_xyz(line, isUp = False)
-
-    if is_Line_Vertical(line) == 1:
-        center_to_change = XYZ(center_to_change.X, center.Y, center_to_change.Z)
-        center_above_to_change = XYZ(center_above_to_change.X, center_above.Y, center_above_to_change.Z)
-    elif is_Line_Vertical(line) == 0:
-        center_to_change = XYZ(center.X, center_to_change.Y, center_to_change.Z)
-        center_above_to_change = XYZ(center_above.X, center_above_to_change.Y, center_above_to_change.Z)
-    center_line = Line.CreateBound(center_to_change, center_above_to_change)
-    TransactionManager.Instance.EnsureInTransaction(doc)
-    line_curve = doc.Create.NewModelCurve(center_line, sketch_plane)
-    # White color the temporal lines, Get the curve's graphics
-    curve_gstyle = line_curve.LineStyle
-    
-    # Create a white color (255, 255, 255)
-    white_color = Color(255, 255, 255)
-    
-    # Set the curve color to white
-    curve_gstyle.GraphicsStyleCategory.LineColor = white_color
-    TransactionManager.Instance.TransactionTaskDone()
-    return line_curve
-        
-
-def delete_all_dimensions():
-    collector = FilteredElementCollector(doc, view.Id).OfCategory(BuiltInCategory.OST_Dimensions)
-    dimensions = collector.WhereElementIsNotElementType().ToElements()
-    dim_ids = [dim.Id for dim in dimensions]
-
-
-    TransactionManager.Instance.EnsureInTransaction(doc)
-    for dim_id in dim_ids:
-        doc.Delete(dim_id)
-    TransactionManager.Instance.TransactionTaskDone()
-
-def side_of_wall(segments): #determines the side of the room from the segments
-    #finds the heighst y coordination of the horizontal segments 
-    segments_horizontal = [segment for segment in segments if is_Line_Vertical(segment.GetCurve()) == 0]
-    segments_y_coor = [segment.GetCurve().GetEndPoint(0).Y for segment in segments_horizontal]
-    max_y = max(segments_y_coor)
-    index_start = -1
-    for i, segment in enumerate(segments):
-        #find the index of it in the original list
-        if segment.GetCurve().GetEndPoint(0).Y == max_y:
-            index_start = i 
-            break
-    
-    side_of_walls = [0]*len(segments)
-    if index_start != -1:
-        for i in range(index_start, index_start +len(segments)):
-            #fill side_of_walls list same order of segements with the values of side of wall
-            #the value of the previous side of wall effecting the value of the next
-            index_segments = i % len(segments)
-            index_last_segments = ((i-1) % len(segments))
-            segment = segments[index_segments]
-            last_segment = segments[index_last_segments]
-
-            #if the current segment is above/below and right/left from the previous 
-            isright = get_center_xyz(segment.GetCurve(), False).X > get_center_xyz(last_segment.GetCurve(), False).X
-            isabove = get_center_xyz(segment.GetCurve(), False).Y > get_center_xyz(last_segment.GetCurve(), False).Y
-            
-            if i == index_start:
-                side_of_walls[index_start] = "bottom"
-            elif is_Line_Vertical(segment.GetCurve()) == is_Line_Vertical(last_segment.GetCurve()):
-                side_of_walls[index_segments] = side_of_walls[index_last_segments]
-            elif side_of_walls[index_last_segments] == "bottom":
-                if (not isright and isabove) or (isright and not isabove):
-                    side_of_walls[index_segments] = "left"
-                else:
-                    side_of_walls[index_segments] = "right"
-            elif side_of_walls[index_last_segments] == "top":
-                if (isright and isabove) or (not isright and not isabove):
-                    side_of_walls[index_segments] = "left"
-                else:
-                    side_of_walls[index_segments] = "right"
-            elif side_of_walls[index_last_segments] == "right":
-                if (isright and isabove) or (not isright and not isabove):
-                    side_of_walls[index_segments] = "bottom"
-                else:
-                    side_of_walls[index_segments] = "top"
-            elif side_of_walls[index_last_segments] == "left":
-                if (not isright and isabove) or (isright and not isabove):
-                    side_of_walls[index_segments] = "bottom"
-                else:
-                    side_of_walls[index_segments] = "top"
-
-        
-    
-    return list(zip(segments, side_of_walls))
-
-def through_a_wall_face(line_element, line_element2):
-    line1 = line_element[0]
-    line2 = line_element2[0]
-    if line_element[1] == line_element2[1]: #both line are at the same side of wall, dim must be through a wall
-        return True 
-    elif line_element[1] == "left" and line_element2[1] == "right":
-        if line1.GetEndPoint(0).X <  line2.GetEndPoint(0).X:
-            return True
-    elif line_element[1] == "right" and line_element2[1] == "left":
-          if line1.GetEndPoint(0).X > line2.GetEndPoint(0).X:
-              return True
-    elif line_element[1] == "top" and line_element2[1] == "bottom":
-        if line1.GetEndPoint(0).Y > line2.GetEndPoint(0).Y:
-            return True
-    elif line_element[1] == "bottom" and line_element2[1] == "top":
-        if line1.GetEndPoint(0).Y < line2.GetEndPoint(0).Y:
-            return True
-    return False
-    
-def lines_coordinates_can_be_dimension(line1, line2):
-    offset = -2
-
-    if  is_Line_Vertical(line1) == 1: #l1 all above or l1 all below  
-        p1_start_above =  line1.GetEndPoint(0).Y > line2.GetEndPoint(0).Y + offset and line1.GetEndPoint(0).Y > line2.GetEndPoint(1).Y+ offset
-        p1_end_above = line1.GetEndPoint(1).Y > line2.GetEndPoint(0).Y + offset and line1.GetEndPoint(1).Y > line2.GetEndPoint(1).Y+ offset
-        p1_start_below =  line1.GetEndPoint(0).Y+ offset < line2.GetEndPoint(0).Y and line1.GetEndPoint(0).Y+ offset < line2.GetEndPoint(1).Y
-        p1_end_below = line1.GetEndPoint(1).Y + offset< line2.GetEndPoint(0).Y and line1.GetEndPoint(1).Y+ offset < line2.GetEndPoint(1).Y
-        if (p1_start_above and p1_end_above) or (p1_start_below and p1_end_below): #l1 (all above) or l1 (all below)  
-            return False
-    elif is_Line_Vertical(line1) == 0:
-        p1_start_right =  line1.GetEndPoint(0).X > line2.GetEndPoint(0).X+ offset and line1.GetEndPoint(0).X > line2.GetEndPoint(1).X+ offset
-        p1_end_rigth = line1.GetEndPoint(1).X > line2.GetEndPoint(0).X + offset and line1.GetEndPoint(1).X > line2.GetEndPoint(1).X+ offset
-        p1_start_left =  line1.GetEndPoint(0).X+ offset < line2.GetEndPoint(0).X and line1.GetEndPoint(0).X+ offset < line2.GetEndPoint(1).X
-        p1_end_left = line1.GetEndPoint(1).X+ offset < line2.GetEndPoint(0).X and line1.GetEndPoint(1).X+ offset < line2.GetEndPoint(1).X
-        if (p1_start_right and p1_end_rigth) or (p1_start_left and p1_end_left):#l1 all right or l1 all left  
-            return False
-    else:
-        return False
-    return True
-        
-
-
-def create_5_possible_dim_between(line1, line2):
-    possible_lines = []
-    is_vertical = is_Line_Vertical(line1)
-
-    #small line = the max line that have same coordinated between 2 boundaries
-    small_line = None
-    if is_vertical == 1:
-        new_max = min(max(line1.GetEndPoint(0).Y, line1.GetEndPoint(1).Y), max(line2.GetEndPoint(0).Y, line2.GetEndPoint(1).Y))
-        new_min = max(min(line1.GetEndPoint(0).Y, line1.GetEndPoint(1).Y), min(line2.GetEndPoint(0).Y, line2.GetEndPoint(1).Y))
-        p_start_small_line = XYZ(line1.GetEndPoint(0).X, new_min, line1.GetEndPoint(0).Z)
-        p_end_small_line = XYZ(line1.GetEndPoint(0).X, new_max, line1.GetEndPoint(0).Z)
-        small_line = Line.CreateBound(p_start_small_line, p_end_small_line)
-    elif is_vertical == 0:
-        new_max = min(max(line1.GetEndPoint(0).X, line1.GetEndPoint(1).X), max(line2.GetEndPoint(0).X, line2.GetEndPoint(1).X))
-        new_min = max(min(line1.GetEndPoint(0).X, line1.GetEndPoint(1).X), min(line2.GetEndPoint(0).X, line2.GetEndPoint(1).X))
-        p_start_small_line = XYZ(new_min, line1.GetEndPoint(0).Y,  line1.GetEndPoint(0).Z)
-        p_end_small_line = XYZ(new_max, line1.GetEndPoint(0).Y, line1.GetEndPoint(0).Z)
-        small_line = Line.CreateBound(p_start_small_line, p_end_small_line)
-    
-    if small_line is not None:
-        quater = float(small_line.Length/4) 
-        offset = 0.5 #that the line created won't touch his boundaries
-        for times in range(0,5):
-            if is_vertical == 1:
-                if small_line.GetEndPoint(0).X > line2.GetEndPoint(0).X:
-                    offset = -offset
-                start_p = XYZ(small_line.GetEndPoint(0).X + offset, small_line.GetEndPoint(0).Y + quater * times, small_line.GetEndPoint(0).Z)
-                end_p = XYZ(line2.GetEndPoint(0).X - offset, small_line.GetEndPoint(0).Y + quater * times, small_line.GetEndPoint(0).Z)
-                possible_lines.append(Line.CreateBound(start_p, end_p))
-                output.append([start_p, end_p])
-            elif is_vertical == 0:
-                if small_line.GetEndPoint(0).Y > line2.GetEndPoint(0).Y:
-                    offset = -offset
-                start_p = XYZ(small_line.GetEndPoint(0).X + quater * times, small_line.GetEndPoint(0).Y + offset, small_line.GetEndPoint(0).Z)
-                end_p = XYZ(small_line.GetEndPoint(0).X + quater * times, line2.GetEndPoint(0).Y - offset, small_line.GetEndPoint(0).Z)
-                possible_lines.append(Line.CreateBound(start_p, end_p))
-                output.append([start_p, end_p])
-           
-    return possible_lines
-    
-
-def line_intersection(lines, line2):
-    count = 0 
-    for line1 in lines:
-        x1 = line1.GetEndPoint(0).X
-        y1 = line1.GetEndPoint(0).Y
-        x2 = line1.GetEndPoint(1).X
-        y2 = line1.GetEndPoint(1).Y
-        x3 = line2.GetEndPoint(0).X
-        y3 = line2.GetEndPoint(0).Y
-        x4 = line2.GetEndPoint(1).X
-        y4 = line2.GetEndPoint(1).Y
-        
-        
-        # Calculate the denominator
-        den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-        
-        # If denominator is zero, lines are parallel
-        if den == 0:
-            return False
-        
-        # Calculate the intersection point
-        t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / den
-        u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / den
-        
-        # Check if intersection point lies on both line segments
-        if 0 <= t <= 1 and 0 <= u <= 1:
-            # output.append(["line1:",(x1, y1, x2, y2),"line2:", (x3, y3, x4, y4)])
-            count += 1
-    if count == 5:
-        return True
-    return False
-  
-    
-def through_a_wall(line1, line2, dimension_lines):
-    possible_dims = create_5_possible_dim_between(line1, line2)
-    for lines_in_room in dimension_lines:
-        for line_element in lines_in_room:
-            if line_intersection(possible_dims, line_element[0]):
-                return True
-    return False
-
-
-
-def need_dimension(line_element, line_element2, dimension_lines): #the lines are parralel and can be connected by perpendicular line (90 degrees)
-    line1 = line_element[0]
-    line2 = line_element2[0]
-    if not lines_coordinates_can_be_dimension(line1, line2):
-        return False
-    #minimum wall size to dimesion from
-    if round((line1.Length)*FEET_TO_CM) < MINIMUM_SEGMENT_LENGTH or round((line2.Length)*FEET_TO_CM) < MINIMUM_SEGMENT_LENGTH:
-        return False
-    #only relavant if dim is larger than DIM_FROM_SIZE
-    if round((distance_between_lines(line1, line2)) * FEET_TO_CM) < DIM_FROM_SIZE:  
-        return False
-    if through_a_wall_face(line_element, line_element2):
-        return False
-    if through_a_wall(line1, line2, dimension_lines):
-        return False
-    return True
-
-
-def create_dimension(line1, line2, room_num):
-    TransactionManager.Instance.EnsureInTransaction(doc)
-    #create a line from the center of the smaller one to the second wall
-    from_line = line1 if line1.Length <= line2.Length else line2
-    to_line = line2 if from_line == line1 else line1
-    
-    line_curve1 = create_center_curve(from_line)
-    line_curve2 = create_center_of_other(to_line, from_line)
-    # point_curve1 = line_curve1.GeometryCurve.GetEndPoint(0)
-    # point_curve2 = line_curve2.GeometryCurve.GetEndPoint(0)
-
-    
-    dim_line_boundaries = [line1, line2]
-    
-    #second option is to color it in the end only the short lines
-
-    ref_array = ReferenceArray() #ref array for dimension
-    ref_array.Append(Reference(line_curve1))
-    ref_array.Append(Reference(line_curve2))
-    #create dimension
-    dim = doc.Create.NewDimension(view, from_line, ref_array)
-    global count_sum_dims
-    count_sum_dims += 1
-    global dim_ids
-    dim_ids.append(dim.Id)
-    dimesion_length = int(round(distance_between_lines(line1, line2)*30.48))
-    if room_num >= 0: #inside room dim and not front of appartment
-        dimesion_length =  dimesion_length - 5  # Decrease the value by 5
-        isvertical = "vertical " + str(room_num)
-        if is_Line_Vertical(from_line) == 1:
-            isvertical = "horizontal " + str(room_num)
-        dim.Below = isvertical #sets temporarly extra info, ver/hor & room num
-        dim.ValueOverride = str(dimesion_length)  # Set the new length as a string
-    elif room_num == -2: #connected dims after all filters 
-        dimesion_length =  dimesion_length - 5  # Decrease the value by 5
-        dim.ValueOverride = str(dimesion_length)  # Set the new length as a string
-    else: #front to street dim
-        # Get all dimension types
-       dim_types = FilteredElementCollector(doc).OfClass(dmt).ToElements()
-       #output.append([d.Name for d in dim_types if d.Name])
-    #    dim_type_3mm_style = next((st for st in dim_types if st.Name == DIM_FRONT_TYPE), None)
-    #    if dim_type_3mm_style:
-    #             dim.ChangeTypeId(dim_type_3mm_style.Id)
-    TransactionManager.Instance.TransactionTaskDone()
-    # Get the geometry curve of the dimension
-
-    return dim_line_boundaries
-
-    
-
-def is_Line_Vertical(line):
-   if round(line.GetEndPoint(0).X, 3) == round(line.GetEndPoint(1).X, 3): #Xstart & Xend are the same, it is Vertical
-      return 1
-   elif round(line.GetEndPoint(0).Y, 3) == round(line.GetEndPoint(1).Y, 3): #Ystart & Yend are the same, it is Horizontal
-      return 0
-   else:
-      return -1 #diagonal
-
-def distance_between_lines(line, line2):
-    if is_Line_Vertical(line) == 1:
-        return abs(line.GetEndPoint(0).X-line2.GetEndPoint(0).X)
-    elif is_Line_Vertical(line) == 0:
-        return abs(line.GetEndPoint(0).Y-line2.GetEndPoint(0).Y)
-
-def dif_less_then_minimum(length, length2, min):
-    if length < length2 and length + min > length2: 
-        return True
-    if length > length2 and length - min < length2:
-        return True
-    return False
+            ceiling = list(all_ceiling)
+            ceiling.extend(FilteredElementCollector(linked_doc).\
+            OfCategory(BuiltInCategory.OST_Ceilings)\
+            .WhereElementIsNotElementType().ToElements())
+            all_ceiling = list(ceiling)
 
 def update_crop_shape():
      # Check if the view has a non-rectangular crop
@@ -704,6 +117,237 @@ def update_crop_shape():
     global view__cropped_shape 
     view__cropped_shape.extend(crop_shape)
 
+
+def update_sum_created(family_item):
+    if family_item == family_vent_mamad:
+        family_sum_created[0] += 1
+    elif family_item == family_elevation_triangle:
+        family_sum_created[1] += 1
+    elif family_item == family_entrance_triangle:
+        family_sum_created[2] += 1
+    elif family_item == family_balcony_triangle:
+        family_sum_created[3] += 1
+    elif family_item == family_vent_close:
+        family_sum_created[4] += 1
+
+def mamad_vetilation_is_needed(room_name):
+    if family_vent_mamad is not None:
+        if "ממד" in room_name:
+            return True       
+    return False
+
+def closed_room_vetilation_is_needed(room):
+    room_name = room_to_name(room)
+    if family_vent_close is not None:
+        if "רחצה" in room_name or "שירותים" in room_name or "מטבח" in room_name:
+            if not window_in_room(room) or not filter_vent_close:
+                return True
+    return False
+
+           
+
+def is_room_elevation_needed(room_names): 
+    if family_elevation_triangle is None:
+        return False
+    for i, room_name in enumerate(room_names):
+        #if the door connects one of the following rooms
+        if "מבואה קומתית" in room_names or "לובי" in room_names and len(room_names) == 2: #if it is entrance
+            return True
+        if ("מטבח" in room_name or "ח. דיור" in room_name or "ח. מגורים" in room_names or "סלון" in room_names) and len(room_names) == 1: #if it is entrance
+            return True
+        if "ממד" in room_name: 
+            return True
+        if "מרפסת" in room_name:
+            return True
+        if "רחצה" in room_name:
+            return True
+        if "שירותים" in room_name:
+            return True
+    return False
+
+def GetRoomAtPoint(p1):
+    for room_n_bb in rooms_n_bbs:
+        min_point = room_n_bb[1][1]
+        max_point = room_n_bb[1][0]
+        in_x = p1.X >= min_point.X and p1.X <= max_point.X
+        in_y = p1.Y >= min_point.Y and p1.Y <= max_point.Y
+        in_z = p1.Z >= min_point.Z and p1.Z <= max_point.Z
+
+        if in_x and in_y and in_z:
+            return room_n_bb[0]
+    return
+
+def which_wall_element_on(element, room): #left\right\up\down
+    is_horizontal = (round(element.Location.Rotation*(180/math.pi)))%180 == 0 
+    #what dimension of the door element is bigger, if its x_diif so it is_horizontal
+    if is_horizontal == None:
+        p_max = element.get_BoundingBox(None).Max
+        p_min = element.get_BoundingBox(None).Min
+        x_diff = p_max.X - p_min.X
+        y_diff = p_max.Y - p_min.Y
+        is_horizontal =  x_diff > y_diff
+
+    z_floor = view.GenLevel.Elevation
+    offset = XYZ(2,2,0)
+    if is_horizontal:
+        offset = XYZ(2,2,0)
+
+    point1 = get_center_bbox(element) + offset
+    point2 = get_center_bbox(element) - offset
+    # Find rooms at these points
+
+    room1 = GetRoomAtPoint(point1) #right/up
+    room2 = GetRoomAtPoint(point2) #left/down
+
+    # if room.Id == ElementId(6074107):
+    #     output.append([ room_to_name(room1), room_to_name(room2)])
+
+      
+
+    # output.append(["a", point1, room_to_name(room1),point2,  room_to_name(room2)]) 
+    # output.append([is_rotation_horizontal, room_to_name(room1), room_to_name(room2)])
+    if room1 is None and room2 is None:
+        return
+    if room1 is None:
+        if room2.Id == room.Id:
+            if is_horizontal:
+                return "up"
+            else:
+                return "right"
+    if room2 is None:
+        if room1.Id == room.Id:
+            if is_horizontal:
+                return "down"
+            else:
+                return "left"
+    
+    if room1 is not None and room1.Id == room.Id:
+            if is_horizontal:
+                return "down"
+            else:
+                return "left"        
+    if room2 is not None and room2.Id == room.Id:
+            if is_horizontal:
+                return "up"
+            else:
+                return "right"
+    #didn't worked so put it visible with a guess
+    if is_horizontal:
+        return "down"
+    else:
+        return "left"
+
+
+def set_room_tag(room):
+    z_floor = view.GenLevel.Elevation
+    # Get the location point of the room
+    point = room.Location.Point
+    
+    # Create a UV object from the XY values of the point
+    uv = UV(point.X, point.Y)
+    
+    # Create the room tag
+    TransactionManager.Instance.EnsureInTransaction(doc)
+    room_tag = doc.Create.NewRoomTag(LinkElementId(room.Id), uv, doc.ActiveView.Id)
+    
+    new_location = XYZ(room_tag.Location.Point.X, room_tag.Location.Point.Y, z_floor)
+    room_tag.Location.Move(new_location.Subtract(room_tag.Location.Point))  
+
+    room_name = room.get_Parameter(BuiltInParameter.ROOM_NAME).AsString()
+
+    # output.append([room_tag.Id, room_name, room_tag.Location.Point])
+    if family_room_tag is not None:
+        element_id = ElementId(family_room_tag.Id) # Convert the ID to ElementId
+        # Get the element
+        family_elemenet = doc.GetElement(element_id)
+        if family_elemenet:
+            family_symbols = family_elemenet.GetFamilySymbolIds()  # Get a set of ElementIds
+            if family_symbols:
+                # Iterate through the family symbols (ElementIds)
+                for symbol_id in family_symbols:
+                    family_symbol = doc.GetElement(symbol_id)  # Get the FamilySymbol object
+                    if family_symbol is not None:
+                        # Ensure the symbol is active
+                        if not family_symbol.IsActive:
+                            family_symbol.Activate()
+                        # Set the tag type
+                        room_tag.ChangeTypeId(family_symbol.Id)
+    TransactionManager.Instance.TransactionTaskDone()
+    
+
+def rotate_the_element (new_instance, location_point, degrees):
+    # Create a rotation axis (vertical vector)
+    axis_vector = XYZ.BasisZ
+    
+    # Convert degrees to radians
+    angle_radians = degrees * (math.pi / 180)
+    
+    # Rotate the instance
+    ElementTransformUtils.RotateElement(doc, new_instance.Id,\
+    Line.CreateBound(location_point, location_point.Add(axis_vector)), angle_radians) 
+
+#add mark instance from family 
+def create_instance_from_family(location_point, family_item, rotation_degrees):
+    #family_box = clr.StrongBox[Family]()
+    
+    element_id = ElementId(family_item.Id) # Convert the ID to ElementId
+    # Get the element
+    family_elemenet = doc.GetElement(element_id)
+    if family_elemenet:
+        family_symbols = family_elemenet.GetFamilySymbolIds()  # Get a set of ElementIds
+        if family_symbols:
+            # Iterate through the family symbols (ElementIds)
+            for symbol_id in family_symbols:
+                family_symbol = doc.GetElement(symbol_id)  # Get the FamilySymbol object
+                if family_symbol is not None:
+                    # Ensure the symbol is active
+                    if not family_symbol.IsActive:
+                        family_symbol.Activate()
+                    move_coor = XYZ(0, 0, 0)
+                    if family_item == family_entrance_triangle:
+                        move_coor =XYZ(0,-1,0)
+                    elif family_item == family_asterist_1 or family_item == family_asterist_2 or family_item == family_asterist_3:
+                        move_coor =XYZ(0, 0.8, 0)
+                    # Create a new instance in room location
+                    # if family_item == family_elevation_triangle:
+                    TransactionManager.Instance.EnsureInTransaction(doc)
+                    new_instance = doc.Create.NewFamilyInstance((location_point+move_coor), family_symbol, doc.ActiveView)
+                    update_sum_created(family_item)
+                    if rotation_degrees != 0:
+                        rotate_the_element(new_instance, location_point, rotation_degrees)
+                    TransactionManager.Instance.TransactionTaskDone()
+
+  
+                    
+
+def side_to_rotate(side_of_door):
+    if side_of_door == "up":
+        return 180
+    elif side_of_door == "down":
+        return 0
+    elif side_of_door == "right":
+        return 90
+    elif side_of_door == "left":
+        return 270
+    else:
+        return 0
+
+def is_entrance_door(room_names):
+    if family_entrance_triangle is None:
+        return False
+    for room_name in room_names:
+        if "מעליות" in room_name or "חדר מדרגות" in room_name:
+            return False
+        if "מבואה קומתית" in room_name and len(room_names) == 2:
+            return True
+        if "לובי" in room_name and len(room_names) == 2:
+            return True
+        if ("ח. דיור" in room_name or "ח. מגורים" in room_name or "סלון" in room_name) and len(room_names) == 1:
+            return True
+        if "מטבח" in room_name and len(room_names) == 1:
+            return True
+    return False
+
 def room_to_name(room):
     if room and room.get_Parameter(BuiltInParameter.ROOM_NAME):
         room_name = room.get_Parameter(BuiltInParameter.ROOM_NAME).AsString().strip()
@@ -712,6 +356,80 @@ def room_to_name(room):
     return ""
 
 
+def empty_room(room):
+    if not room:
+        return True
+    elif room.get_BoundingBox(doc.ActiveView) == None:
+        return True
+    elif room.Location == None or room.Location.Point == None:
+        return True
+    elif room.get_Parameter(BuiltInParameter.ROOM_NAME) == None or room.get_Parameter(BuiltInParameter.ROOM_NAME).AsString() == "":
+        return True
+    else:
+        return False
+
+def room_not_in_appartment(room):
+    z_floor = view.GenLevel.Elevation
+    if room.Location.Point.Z != z_floor:
+        return True
+    
+    room_name = room_to_name(room)
+    rooms_outside = ["מבואה", "לובי", "חדר מדרגות", "מעליות"]
+    for room_outside in rooms_outside:
+        if room_outside in room_name:
+            return True
+    return False
+
+def is_mamad_door(room_names):
+    if family_asterist_3 != None:
+        for room_name in room_names:
+            if "ממד" in room_name:
+                return True
+    return False 
+
+def is_1_asterisk_door(room_names):
+    if family_asterist_1 != None:
+        if is_entrance_door(room_names):
+            return True
+        for room_name in room_names:
+            if "מחסן" in room_name or "רחצה" in room_name or "שירותים" in room_name:
+                return True
+    return False
+
+def is_2_asterisk_door(room_names):
+    if family_asterist_2 != None:
+        for room_name in room_names:
+            if "מרפסת" in room_name:
+                return True
+    return False
+
+def filter_relevant_rooms(rooms): #delete empty & duplicate
+   rooms_not_empty = [room for room in rooms if not empty_room(room)] #delete empty
+    
+   #remove rooms that are not in the appartment
+   rooms_in_view = [room for room in rooms_not_empty if is_in_cropped_view(room.Location.Point)]
+
+   rooms_in_appartment = [room for room in rooms_in_view if not room_not_in_appartment(room)]
+
+   rooms_locations = [room.Location.Point for room in rooms_in_appartment]
+    #delete duplicate rooms with same locations
+   rooms_not_duplicate = [room for index, room in enumerate(rooms_in_appartment) if room.Location.Point not in rooms_locations[:index]]
+
+   rooms_bbs = [[room.get_BoundingBox(None).Max, room.get_BoundingBox(None).Min] for room in rooms_not_duplicate]
+   global rooms_n_bbs
+   rooms_n_bbs = list(zip(rooms_not_duplicate, rooms_bbs))
+
+   return rooms_not_duplicate
+
+    
+def doors_to_print(doors):
+    room_names = []
+    for door in doors:
+        phase = doc.GetElement(door.CreatedPhaseId)
+        rooms_of_door = [door.FromRoom[phase], door.ToRoom[phase]]
+        room_names.append([room_to_name(room) for room in rooms_of_door\
+                           if room and room.Location and room.Location.Point] )
+    return room_names
 
 def is_in_cropped_view(point):
     global view__cropped_shape
@@ -726,222 +444,409 @@ def is_in_cropped_view(point):
             count += 1
     return count % 2 == 1
 
-def get_center_wall(wall):
-    wall_bb = wall.get_BoundingBox(None)
-    wall_center = XYZ(((wall_bb.Max.X + wall_bb.Min.X) / 2), ((wall_bb.Max.Y + wall_bb.Min.Y) / 2), ((wall_bb.Max.Z + wall_bb.Min.Z) / 2))
-    return wall_center
 
+def get_center_bbox(item):
+    return (item.get_BoundingBox(None).Min + item.get_BoundingBox(None).Max) / 2
 
-def order_walls_list(walls):
-    walls_in_floor = [wall for wall in walls if wall.LevelId == view.GenLevel.Id]
-    walls_in_appartment = [wall for wall in walls_in_floor if is_in_cropped_view(get_center_wall(wall))]
-    return walls_in_appartment
-     
-def room_not_in_appartment(room):
-    z_floor = view.GenLevel.Elevation
-    # output.append([room.Location.Point  , z_floor])
-    if room.Location.Point.Z != z_floor:
-        return True
-    
-    room_name = room_to_name(room)
-    rooms_outside = ["מבואה", "לובי", "חדר מדרגות", "מעליות"]
-    for room_outside in rooms_outside:
-        if room_outside in room_name:
-            return True
-    return False
+def get_location_point(item):
+     if item.Category.Name.strip() == "Ceilings":
+         return get_center_bbox(item)
+     else:
+         return item.Location.Point
 
-def empty_room(room):
-    if not room:
-        return True
-    elif room.get_BoundingBox(doc.ActiveView) == None:
-        return True
-    elif room.Location == None or room.Location.Point == None:
-        return True
-    elif room.get_Parameter(BuiltInParameter.ROOM_NAME) == None or room.get_Parameter(BuiltInParameter.ROOM_NAME).AsString() == "":
-        return True
-    else:
-        return False
-
-def order_rooms_list(rooms): #delete empty & duplicate
-   rooms_not_empty = [room for room in rooms if not empty_room(room)] #delete empty
-    
-   #remove rooms that are not in the appartment
-   rooms_in_view = [room for room in rooms_not_empty if is_in_cropped_view(room.Location.Point)]
-
-   rooms_in_appartment = [room for room in rooms_in_view if not room_not_in_appartment(room)]
-    #    output.append(rooms_in_appartment)
-
-
-   rooms_locations = [room.Location.Point for room in rooms_in_appartment]
-    #delete duplicate rooms with same locations
-   rooms_not_duplicate = [room for index, room in enumerate(rooms_in_appartment) if room.Location.Point not in rooms_locations[:index]]
-
-   return rooms_not_duplicate
-
-
-def wall_is_balcony_or_garden(wall):
-    room_height_cm = 0
-    z_level = doc.ActiveView.GenLevel.Elevation
-    wall_bb = wall.get_BoundingBox(None)
-
-    if rooms != []:
-        room_height = rooms[0].get_BoundingBox(None).Max.Z - rooms[0].get_BoundingBox(None).Min.Z
-        room_height_cm = round(room_height * FEET_TO_CM)
-        wall_height_cm =  round((wall_bb.Max.Z - wall_bb.Min.Z) * FEET_TO_CM)
-        #if the height of a wall is below 80cm and more from a room[0] height its probably a balcony/garden wall 
-        if wall_height_cm < (room_height_cm - 50): 
-            return True
-        
-    wall_center = XYZ(((wall_bb.Max.X + wall_bb.Min.X) / 2), ((wall_bb.Max.Y + wall_bb.Min.Y) / 2), z_level)
-    off_sets = [XYZ(2,0,0), XYZ(-2,0,0), XYZ(0,2,0), XYZ(0,-2,0)]
-    for off_set in off_sets:
-        room = doc.GetRoomAtPoint(wall_center + off_set)
-        if room and room is not None:
-            if "מרפסת" in room_to_name(room):
-                return True
-            if "חצר" in room_to_name(room):
-                return True
-    return False
-
-
-
-def dim_front_of_appartment(walls):
-    x_coordinates = []
-    y_coordinates = []
-    z_level = doc.ActiveView.GenLevel.Elevation
-
-    if len(walls) == 0:
-        return
-    for wall in walls:
-        if not wall_is_balcony_or_garden(wall):
-            wall_bb = wall.get_BoundingBox(None)
-            wall_min = wall_bb.Min
-            wall_max = wall_bb.Max
-            if is_in_cropped_view(wall_min):
-                x_coordinates.append(wall_min.X)
-                y_coordinates.append(wall_min.Y)
-            if is_in_cropped_view(wall_max):
-                x_coordinates.append(wall_max.X)
-                y_coordinates.append(wall_max.Y)
-    
-    left_side_coor = min(x_coordinates)
-    right_side_coor = max(x_coordinates)
-    top_side_coor = max(y_coordinates)
-    bottom_side_coor = min(y_coordinates)
-
-    #detect the 2 front side, where a little     bit out of crop there is no room in point
-    #where_is_front(left_side_coor, right_side_coor, top_side_coor, bottom_side_coor, z_level)
-    width_front_max = Line.CreateBound(XYZ(right_side_coor, top_side_coor, z_level), XYZ(right_side_coor, top_side_coor - 5, z_level))
-    width_front_min = Line.CreateBound(XYZ(left_side_coor, top_side_coor, z_level), XYZ(left_side_coor, top_side_coor - 5, z_level))
-
-    create_dimension(width_front_min, width_front_max, -1)
-
-    length_front_max = Line.CreateBound(XYZ(right_side_coor, top_side_coor, z_level), XYZ(right_side_coor - 5, top_side_coor, z_level))
-    length_width_min = Line.CreateBound(XYZ(right_side_coor, bottom_side_coor, z_level), XYZ(right_side_coor - 5, bottom_side_coor, z_level))
-    create_dimension(length_width_min, length_front_max, -1)
-
-
-def get_v_h_lines(rooms):
-    horizon_lines = [] #[room[segments_curve,segments_curve2],room2...]
-    vertical_lines = []
-    #get all room, and then, segments (walls) and seperaate to vertical and horizontal
-    #get all room 
-    for room in rooms:
-        room_vertical = []
-        room_horizontal = []
-        #get all segments from rooms, same as walls
-        boundaries = room.GetBoundarySegments(SpatialElementBoundaryOptions())
-        if boundaries:
-            for segments in boundaries:
-                segments_side_of_wall = side_of_wall(segments) #attach the sideofwall to every segments of room
-                # is_ver_list = [is_Line_Vertical(segment.GetCurve()) for segment in segments]
-                #output.append([room_to_name(room), len(segments), is_ver_list])
-                for segment_element in segments_side_of_wall:
-                    segment_curve = segment_element[0].GetCurve()
-                    if is_Line_Vertical(segment_curve) == 1:
-                        #output.append(side_of_wall(True, segment.GetCurve(), room))
-                        room_vertical.append([segment_curve, segment_element[1], room]) #add all v lines in a room to list
-                    elif is_Line_Vertical(segment_curve) == 0:
-                        room_horizontal.append([segment_curve, segment_element[1], room]) #add all h lines in a room to list
-        #create 2 lists v and h of rooms and inside them lists of walls, list[room[wall, wall],..]
-        vertical_lines.append(room_vertical)
-        horizon_lines.append(room_horizontal)  
-    return horizon_lines, vertical_lines
-
-def creates_all_dimensions(dimension_lines, isVertical):
-    #for every segment check if need to create dimesion to all other parralel segments in same room 
-    for room_num, lines_in_room in enumerate(dimension_lines):
-        for index, line_element  in enumerate (lines_in_room): #v_line_element = [curve, side on the wall]
-            for line_element2 in lines_in_room[index+1:]: #not with himself, and only items after him, simetrical act
-                if need_dimension(line_element, line_element2, dimension_lines): #2 vertical walls need to the same Ys to be dimesioned between, & minumun dim size
-                        #from vertical segments\walls you create horizontal dims
-                        dim_line_boundaries = create_dimension(line_element[0], line_element2[0], room_num)
-                        if isVertical:
-                            h_dims_lengths.append([round(distance_between_lines(line_element[0], line_element2[0])* FEET_TO_CM), room_num, dim_line_boundaries])
-                        else:
-                            v_dims_lengths.append([round(distance_between_lines(line_element[0], line_element2[0])* FEET_TO_CM), room_num, dim_line_boundaries])
-
-def filter_dimensions():
-    #gets all dimensions that created now
-    doc = DocumentManager.Instance.CurrentDBDocument
-    TransactionManager.Instance.EnsureInTransaction(doc)
-    collector = FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_Dimensions)
-    dimensions = collector.WhereElementIsNotElementType().ToElements()
-    global dim_ids
-    dims_created_now = [dim for dim in dimensions if dim.Id in dim_ids]   
-    #get all the dimensions length to delete
-    lengths_to_delete = []
-    #checks for duplicate dimesions values in the same room and rotation and delete them
-    lengths_to_delete.append(list(filter_duplicates(dims_created_now)))
-
-    #checks for dimesions with the same size by offset of MIN_DIFF_BETWEEN_2_DIM_SAME_ROOM and delete them 
-    lengths_to_delete.append(list(filter_small_diff_dim(dims_created_now)))
-    
-
-    lengths_to_delete = list(lengths_to_delete[0] + lengths_to_delete[1])
-    #delete every dim to delete
-    for dim in dims_created_now:
-        below = dim.Below.split(' ') #[isvertical, room number]
-        for len_del in lengths_to_delete:
-            if len_del[2] == int(below[1]): #same room
-                if (len_del[1] == 0 and  below[0] =="horizontal") or  (len_del[1] == 1 and  below[0] == "vertical"): #same orietation
-                        if int(dim.ValueOverride) + 5 == len_del[0]: #same size
-                            try:
-                                lengths_to_delete.remove(len_del)
-                            except:
-                                pass
-                            doc.Delete(dim.Id)
-                            break   
-
+def filter_all_elements(all_elements): #door/windows delete empty & duplicate, and only with same level
+   #delete elements that are not in the same level
+   elements_same_level = [element for element in all_elements if element.LevelId == view.GenLevel.Id and element.Location]
+   elements_in_view = [e for e in elements_same_level if is_in_cropped_view(get_location_point(e))]
    
+   if len(elements_in_view) == 0:
+        return []
+   
+   if elements_in_view[0].Category.Name.strip() == "Windows" or elements_in_view[0].Category.Name.strip() == "Ceilings": #return if element is windows
+        return elements_in_view
+   
+   if elements_in_view[0].Category.Name.strip() == "Doors":
+        doors_to_delete = []
+        for door in elements_in_view:
+            phase = doc.GetElement(door.CreatedPhaseId)
+            rooms_of_door = [door.FromRoom[phase], door.ToRoom[phase]]
+            rooms_of_door_not_empty = [room for room in rooms_of_door if not empty_room(room)]
+            room_names = rooms_to_names(rooms_of_door_not_empty)
+            
+            if "מעליות" in room_names or "חדר מדרגות" in room_names:
+                    doors_to_delete.append(door)
+        
+        for door_to_delete in doors_to_delete:
+            if door_to_delete in elements_in_view:
+                elements_in_view.remove(door_to_delete)
+   
+   return elements_in_view
+
+def is_a_balcony_entrance(room_names):
+    if family_balcony_triangle is None:
+        return False
+    if len(room_names) == 2:
+        for room_name in room_names:
+            if "מרפסת" in room_name:
+                return True
+    return False
+
+def rooms_to_names(rooms):
+    return [room_to_name(room) for room in rooms if not empty_room(room)]
+
+def window_in_room(room):
+    # Get the bounding box of the room
+    room_bb = room.get_BoundingBox(None)
+    # Check each window
+    for window in windows:
+        # Get the center point of the window
+        window_loc = window.Location.Point
+        xy_offset = 1
+        z_offset = 0.1
+        # Check if the window's center point is within the room's bounding box
+        if (room_bb.Min.X - xy_offset <= window_loc.X <= room_bb.Max.X + xy_offset and
+              room_bb.Min.Y - xy_offset <= window_loc.Y <= room_bb.Max.Y + xy_offset and
+            room_bb.Min.Z + z_offset <= window_loc.Z <= room_bb.Max.Z - z_offset):
+            return True
+    
+    return False
+
+def windows_vitrines_to_rooms(windows):
+    rooms_of_window = []
+    
+    for window in windows:
+
+        window_family_name = window.Symbol.Family.Name.lower()
+        if "vitrina" in window_family_name: #if it is a vitrine
+           
+            # Find the center point of the window
+            center_of_wall = window.Location.Point
+
+            if center_of_wall is not None: 
+                # Create offset points on both sides of the window
+                direction = window.FacingOrientation
+                # Small offset to ensure we're inside the rooms
+                point1 = center_of_wall + direction + XYZ(0,0,1)
+                point2 = center_of_wall - direction + XYZ(0,0,1)
+                # Find rooms at these points
+                room1 = doc.GetRoomAtPoint(point1)
+                room2 = doc.GetRoomAtPoint(point2)
+               
+                if room1 is not None or room2 is not None:
+                    rooms_of_window.append([window, room1, room2])
+    
+    return rooms_of_window
+
+def delete_old_symbols_tags():
+    room_tags = FilteredElementCollector(doc, doc.ActiveView.Id).OfCategory(BuiltInCategory.OST_RoomTags).WhereElementIsNotElementType().ToElements()
+    for room_tag in room_tags:
+        TransactionManager.Instance.EnsureInTransaction(doc)
+        doc.Delete(room_tag.Id)
+        TransactionManager.Instance.TransactionTaskDone()
+
+    families = [family_vent_mamad, family_balcony_triangle, family_elevation_triangle,\
+                   family_entrance_triangle, family_vent_close, family_asterist_1,\
+                      family_asterist_2, family_asterist_3]
+    family_names = [family.Name for family in families if family is not None]
+
+    #Create a filter for the specific family name
+    for family_name in family_names:
+        # Create a filtered element collector
+        collector_family_instances = FilteredElementCollector(doc, doc.ActiveView.Id).OfClass(FamilyInstance)
+        # Create a filter for the specific family name
+        family_param_id = ElementId(BuiltInParameter.ELEM_FAMILY_PARAM)
+        family_name_rule = ParameterFilterRuleFactory.CreateEqualsRule(family_param_id, family_name, False)
+        family_name_filter = ElementParameterFilter(family_name_rule)
+    
+        # Apply the filter to the collector
+        elements = collector_family_instances.WherePasses(family_name_filter).WhereElementIsNotElementType().ToElements()
+        # Create a list to store element ids
+        element_ids = [element.Id for element in elements]
+
+        TransactionManager.Instance.EnsureInTransaction(doc)
+        for element_id in element_ids:
+            doc.Delete(element_id)
+        TransactionManager.Instance.TransactionTaskDone()
+
+      
+#includes entrance_door\elevation change symbol\balcony exit
+def add_all_doors_symbols(doors):
+    for door in doors:
+        location = door.Location
+        if isinstance(location, LocationPoint): #if door is a real object
+            door_location = location.Point
+            phase = doc.GetElement(door.CreatedPhaseId)
+        
+            # Get the rooms name on both sides of the door
+            rooms_of_door = [door.FromRoom[phase], door.ToRoom[phase]]
+            room_names = rooms_to_names(rooms_of_door)
+            
+            if is_entrance_door(room_names): #entrance door
+                room_to_check = rooms_of_door[0] #the enrance room ח.מגורים
+               
+                if  empty_room(room_to_check) or "מבואה קומתית" in room_to_name(room_to_check) or "לובי" in room_to_name(room_to_check):
+                    room_to_check = rooms_of_door[1]
+               
+                #determine where is the door up/down/left/right wall
+                side_of_door = which_wall_element_on(door, room_to_check)
+                rotate_degrees = side_to_rotate(side_of_door)
+            
+                #create an instance of family_entrance_triangle symbol
+                create_instance_from_family(door_location, family_entrance_triangle, rotate_degrees)
+              
+
+
+            if is_room_elevation_needed(room_names): #if door is between several rooms or entrance door
+                is_rotation_horizontal =  (round(math.degrees(location.Rotation)) % 180 == 0)
+                rotate_degrees = 0 if is_rotation_horizontal else 90
+                
+                #create an instance of family_elevation_triangle symbol
+                create_instance_from_family(door_location, family_elevation_triangle, rotate_degrees)
+            
+            if is_a_balcony_entrance(room_names):
+                room_to_check = rooms_of_door[0] if rooms_of_door[0] != None else rooms_of_door[1]
+                if rooms_of_door[0] != None and rooms_of_door[1] != None:
+                    #the room that is not the balcony
+                    room_to_check = rooms_of_door[1] if "מרפסת" in room_to_name(rooms_of_door[0]) else rooms_of_door[0] 
+
+                #determine where is the door up/down/left/right wall
+                side_of_door = which_wall_element_on(door, room_to_check)
+                rotate_degrees = side_to_rotate(side_of_door)
+
+                rotate_degrees = (rotate_degrees+ 180) % 360
+
+                #create an instance of family_balcony_triangle symbol
+                create_instance_from_family(door_location, family_balcony_triangle, rotate_degrees) 
+                family_sum_created[2] -= 1
+                family_sum_created[3] += 1
+                 
+
+            if is_1_asterisk_door(room_names): #מרפסת/רחצה/שירותים/מחסן או כניסה
+                room_to_check = rooms_of_door[0] #the enrance room ח.מגורים
+                if "רחצה" in room_to_name(rooms_of_door[1]) or "שירותים" in room_to_name(rooms_of_door[1]) or "מחסן" in room_to_name(rooms_of_door[1]):
+                     room_to_check = rooms_of_door[1]
+                elif empty_room(room_to_check) or "מבואה קומתית" in room_to_name(room_to_check) or "לובי" in room_to_name(room_to_check):
+                    room_to_check = rooms_of_door[1]
+
+                #determine where is the door up/down/left/right wall
+                side_of_door = which_wall_element_on(door, room_to_check)
+                # output.append([room_to_check.Id, side_of_door])
+                rotate_degrees = side_to_rotate(side_of_door)
+
+                #1 asterisk symbol for entrance
+                create_instance_from_family(door_location, family_asterist_1, rotate_degrees)
+
+            if is_2_asterisk_door(room_names):  
+                room_to_check = rooms_of_door[0] if rooms_of_door[0] != None else rooms_of_door[1]
+                if rooms_of_door[0] != None and rooms_of_door[1] != None:
+                    #the room that is not the balcony
+                    room_to_check = rooms_of_door[1] if "מרפסת" in room_to_name(rooms_of_door[0]) else rooms_of_door[0] 
+
+                #determine where is the door up/down/left/right wall
+                side_of_door = which_wall_element_on(door, room_to_check)
+                rotate_degrees = side_to_rotate(side_of_door)
+                rotate_degrees = rotate_degrees
+
+                 #2 asterisk symbol for entrance
+                create_instance_from_family(door_location, family_asterist_2, rotate_degrees)
+
+            if is_mamad_door(room_names):   
+                room_to_check = rooms_of_door[0] 
+                if "ממד" in room_to_name(rooms_of_door[1]):
+                    room_to_check = rooms_of_door[1]
+
+                side_of_door = which_wall_element_on(door, room_to_check)
+                rotate_degrees = side_to_rotate(side_of_door)
+                #3 asterisk symbol for entrance
+                create_instance_from_family(door_location, family_asterist_3, rotate_degrees)
+ 
+           
+def add_vitrine_symbols(vitrine_windows):
+    for window, room1, room2 in vitrine_windows:
+        room_names = rooms_to_names([room1, room2])
+        # z_floor = round(view.GenLevel.Elevation, 2)
+
+        if is_a_balcony_entrance(room_names) or ((room1 is None or room2 is None)): #if there is one room near vitrina is empty it is exit to balcony or garden 
+            room_to_check = room1 if room1 != None else room2
+            if room1 != None and room2 != None:
+                room_to_check = room2 if "מרפסת" in room_to_name(room1) else room1 #the room that is not the balcony
+
+            #determine where is the window up/down/left/right wall
+            side_of_window = which_wall_element_on(window, room_to_check)
+
+            rotate_degrees = side_to_rotate(side_of_window)
+            asteriskt_rotate_degrees = rotate_degrees
+            rotate_degrees = (rotate_degrees+ 180) % 360
+
+            #create an instance of family_balcony_triangle
+            create_instance_from_family(window.Location.Point, family_balcony_triangle, rotate_degrees)
+            family_sum_created[2] -= 1
+            family_sum_created[3] += 1
+
+            if family_asterist_2 is not None:
+                #2 asterisk symbol for entrance
+                create_instance_from_family(window.Location.Point, family_asterist_2, asteriskt_rotate_degrees)
+
+        if is_room_elevation_needed(room_names):
+            #create an instance of family_elevation_triangle
+            create_instance_from_family(window.Location.Point, family_elevation_triangle, rotate_degrees)
+
+def add_all_rooms_symbols(rooms):
+    for room in rooms:
+        if room is not None and room.Location is not None: #not empty
+            room_name = room_to_name(room)
+            set_room_tag(room)
+            below_room_tag = room.Location.Point - XYZ(0,1,0)
+
+            if mamad_vetilation_is_needed(room_name): #add to MAMAD room an air ventilation symbol
+                #create an instance of circle air ventilation symbol      
+                create_instance_from_family(below_room_tag, family_vent_mamad, 0)
+            
+
+            if closed_room_vetilation_is_needed(room): #Venta ventelation     
+                #create an instance of venta double circle symbol
+                create_instance_from_family(below_room_tag, family_vent_close, 0)
+
+def create_ceiling_lines(curve_edges):
+    z_floor = view.GenLevel.Elevation
+    lines = []
+    points = []
+    if len(curve_edges) == 12: #rectangle box
+        for curve in curve_edges[:4]:
+            points.append(XYZ(curve.GetEndPoint(0).X, curve.GetEndPoint(0).Y, z_floor)) #take only the bottom face of rectangle
+        
+        lines.append(Line.CreateBound(points[0], points[2]))
+        lines.append(Line.CreateBound(points[1], points[3]))
+    else: 
+        base_of_ceiling_z = curve_edges[0].GetEndPoint(0).Z
+        #take only the bottom face of the shape
+        curves_edges_level = [curve for curve in curve_edges if curve.GetEndPoint(0).Z == base_of_ceiling_z and curve.GetEndPoint(1).Z == base_of_ceiling_z]
+
+        # output.append(len(curves_edges_level))
+        # for curve in curves_edges_level:
+        #     output.append(["here:", curve.GetEndPoint(0), curve.GetEndPoint(1)])
+        for curve in curves_edges_level:
+            start_point = XYZ(curve.GetEndPoint(0).X, curve.GetEndPoint(0).Y, z_floor)
+            end_point = XYZ(curve.GetEndPoint(1).X, curve.GetEndPoint(1).Y, z_floor)
+            try: #create all lines the surronding the lower ceiling
+                line = Line.CreateBound(start_point, end_point)
+            except:
+                continue
+            lines.append(line)
+
+
+    # Get the "Overhead Small" line style
+    line_styles = FilteredElementCollector(doc).OfClass(GraphicsStyle).ToElements()
+    overhead_small_style = next((ls for ls in line_styles if ls.Name == "Overhead Small"), None)
+
+    if overhead_small_style is None:
+        print("Overhead Small line style not found.")
+    else:
+        # Create the detail line
+        for line in lines:
+            TransactionManager.Instance.EnsureInTransaction(doc)
+            detail_line = doc.Create.NewDetailCurve(doc.ActiveView, line)
+            
+            # Set the line style
+            detail_line.LineStyle = overhead_small_style
+            TransactionManager.Instance.TransactionTaskDone()
+
+
+def ceiling_get_height(ceiling):
+    level_height = view.GenLevel.Elevation
+    ceiling_z = ceiling.get_BoundingBox(None).Min.Z
+    return round((ceiling_z - level_height) * FEET_TO_CM)
+
+
+def filter_only_lower_ceiling(ceilings):
+    if len(ceilings) == 0:
+        return
+    ceilings_z_cm = [ceiling_get_height(ceiling) for ceiling in ceilings]
+    max_ceiling_height = max(ceilings_z_cm)
+    ceilings_no_max = [c for c in ceilings if ceiling_get_height(c) <= (max_ceiling_height - LOWER_CEILING_DIFF)] #10cm
+
+    return ceilings_no_max
+
+
+def mark_lower_ceiling(ceilings):
+    ceilings_no_max = filter_only_lower_ceiling(ceilings)
+  
+    if ceilings_no_max != None:
+        for ceiling in ceilings_no_max:
+            geo_element = ceiling.get_Geometry(Options())
+            boundary_curves = []
+        
+            # Iterate through the geometry objects
+            for geo_obj in geo_element:
+                if isinstance(geo_obj, Solid):
+                    # Get the edges of the solid
+                    edges = geo_obj.Edges
+                    for edge in edges:
+                        # Add the curve of each edge to the boundary curves list
+                        boundary_curves.append(edge.AsCurve())
+                
+            
+            create_ceiling_lines(boundary_curves)
+     
+def errors_to_user():
+    if len(rooms) == 0:
+        errors.append("No rooms in view")
+    if family_elevation_triangle is None:
+        errors.append("no elevation change family was found, check if you wrote it correctly & the family rfa file is loaded to project")
+    if family_entrance_triangle is None:
+        errors.append("no exit appartment arrow family was found,check if you wrote it correctly & the family rfa file is loaded to project")
+    if family_balcony_triangle is None:
+        errors.append("no balcony entrance arrow family was found, check if you wrote it correctly & the family rfa file is loaded to project")
+    if family_vent_mamad is None:
+        errors.append("no mamad vetilation family was found, check if you wrote it correctly & the family rfa file is loaded to project")
+    if family_vent_close is None:
+        errors.append("no Avrar Meulatz family was found, check if you wrote it correctly & the family rfa file is loaded to project")
+    if family_room_tag is None:
+        errors.append("no Room Tag family was found, check if you wrote it correctly & the family rfa file is loaded to project")
+    if family_asterist_1 is None or family_asterist_2 is None or family_asterist_3 is None:
+        errors.append("at least one of asterisk */**/*** family was found, check if you wrote it correctly & the family rfa file is loaded to project")
+    output.append(errors)
+
+def output_result():
+    result = []
+    result.append(str(family_sum_created[0]) + " Mamad ventelation added")
+    result.append(str(family_sum_created[1]) + " Elevation arrow added")
+    result.append(str(family_sum_created[2]) + " Exit appartment arrown added")
+    result.append(str(family_sum_created[3]) + " Balcony entrance arrow added")
+    result.append(str(family_sum_created[4]) + " Avrar Meulatz vetilation added")   
+
+    output.append(result)
+    
+
 if True: # if __name__ == "__main__":
     # Check if the active view is a floor plan view
     if not isinstance(doc.ActiveView, ViewPlan):
         errors.append("Please run this script in a floor plan view.")
     else:
         update_crop_shape()
-        if is_override:
-            delete_all_dimensions()
+        #override old symbols
+        delete_old_symbols_tags()
 
         get_linked_elements()
-        rooms = order_rooms_list(rooms) #delete empty & duplicate
-        walls = order_walls_list(walls) #takes only from same level
-
-        horizon_lines, vertical_lines = get_v_h_lines(rooms)
-
-        creates_all_dimensions(vertical_lines, True)
-        creates_all_dimensions(horizon_lines, False)
+        windows = filter_all_elements(all_windows)
+        rooms = filter_relevant_rooms(rooms)
         
-        filter_dimensions()
+        doors = filter_all_elements(all_doors)
+        ceilings = filter_all_elements(all_ceiling)
 
-        connect_broken_dims()
+        add_all_doors_symbols(doors) #includes entrance_door\elevation change symbol\balcony exit
 
-        delete_below_text()  
+        vitrine_windows = windows_vitrines_to_rooms(windows) #[window, room1, room2]
 
-        dim_front_of_appartment(walls)
+        add_vitrine_symbols(vitrine_windows) #includes elevation change symbol\balcony exit
 
-        output.append(str(count_sum_dims + 2) + " dimensions created")
+        add_all_rooms_symbols(rooms) #includes Mamad ventilation\Venta Ventilation and Room Tag 
 
-        output.append(errors)
+        mark_lower_ceiling(ceilings)
+
+        errors_to_user()
+
+        output_result() #counts all intances that were addded
+
 
 OUT = output
